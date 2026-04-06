@@ -8,31 +8,65 @@ st.title("🧬 miRNA Upregulation Predictor — v1 Scenario")
 st.caption("Random Forest · OHE · Features: miRNA group, parasite, organism, cell type, time, scenario · OOB evaluation")
 
 ORGANISM_PREFIX = {"Human": "hsa-", "Mouse": "mmu-"}
-MODEL_FILE = "Mir_v1_scenario_model.pkl"
+
+# ── Load model ────────────────────────────────────────────────────────────────
+# v1 was saved as a raw sklearn pipeline (not a dict bundle).
+# We borrow mirna_lookup from v2 or v3 since they share the same dataset.
+V1_MODEL_FILE = "Mir_v1_scenario_model.pkl"
+FALLBACK_FILES = ["Mir_v2_family_scenario_model.pkl", "Mir_v3_family_model.pkl"]
 
 @st.cache_resource
-def load_model():
-    with open(MODEL_FILE, 'rb') as f:
-        return joblib.load(f)
+def load_v1():
+    if not os.path.exists(V1_MODEL_FILE):
+        return None, None, None
 
-if not os.path.exists(MODEL_FILE):
-    st.error(f"Model file `{MODEL_FILE}` not found. Place it in the same directory as this script.")
+    pipeline = joblib.load(V1_MODEL_FILE)
+
+    # If someone already saved v1 as a dict bundle, handle that too
+    if isinstance(pipeline, dict):
+        return (
+            pipeline['model'],
+            pipeline.get('mirna_lookup', {}),
+            pipeline.get('oob_score', None),
+        )
+
+    # Raw pipeline — borrow mirna_lookup from v2 or v3
+    mirna_lookup = {}
+    for fallback in FALLBACK_FILES:
+        if os.path.exists(fallback):
+            bundle = joblib.load(fallback)
+            if isinstance(bundle, dict) and 'mirna_lookup' in bundle:
+                mirna_lookup = bundle['mirna_lookup']
+                break
+
+    # OOB score is stored inside the classifier step
+    try:
+        oob_score = pipeline.named_steps['classifier'].oob_score_
+    except Exception:
+        oob_score = None
+
+    return pipeline, mirna_lookup, oob_score
+
+model, mirna_lookup, oob_score = load_v1()
+
+if model is None:
+    st.error(f"Model file `{V1_MODEL_FILE}` not found. Place it in the same directory as this script.")
     st.stop()
 
-bundle = load_model()
-if isinstance(bundle, dict):
-    model        = bundle['model']
-    mirna_lookup = bundle['mirna_lookup']
-    oob_score    = bundle.get('oob_score', None)
-else:
-    st.error("Unexpected model format for v1. Expected a dict bundle.")
+if not mirna_lookup:
+    st.error(
+        f"No miRNA lookup found. Place at least one of "
+        f"`{'` or `'.join(FALLBACK_FILES)}` alongside this script so miRNA names can be loaded."
+    )
     st.stop()
 
+# ── OOB banner ────────────────────────────────────────────────────────────────
 if oob_score:
     st.markdown("#### Model Performance")
     st.metric("OOB Accuracy", f"{oob_score:.3f}")
     st.divider()
 
+# ── Helper ────────────────────────────────────────────────────────────────────
 def build_input_row(mirna_group, parasite, organism, cell_type, time_val):
     return pd.DataFrame([{
         'microrna_group_simplified': mirna_group,
@@ -43,6 +77,7 @@ def build_input_row(mirna_group, parasite, organism, cell_type, time_val):
         'scenario':                  f"{parasite.strip()}_{cell_type.strip()}",
     }])
 
+# ── UI ────────────────────────────────────────────────────────────────────────
 st.subheader("📊 Top miRNAs Predicted Up or Down Under Your Conditions")
 st.caption("Scores every miRNA in the database that matches the selected organism.")
 
@@ -57,6 +92,7 @@ rl_top_n    = st.slider("Number of miRNAs to show per direction", 5, 30, 10)
 if st.button("🔍 Rank All miRNAs", type="primary"):
     prefix = ORGANISM_PREFIX.get(rl_organism, "")
 
+    # ── Organism filter ───────────────────────────────────────────────────────
     filtered = {
         name: entry
         for name, entry in mirna_lookup.items()
